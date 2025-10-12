@@ -2,51 +2,44 @@ package com.dcp;
 
 import android.graphics.Rect;
 import android.os.IBinder;
+import android.util.Log;
 import android.view.Surface;
 
-import java.lang.reflect.Constructor;
-import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 
 public final class SurfaceControlWrapper {
-    // Core classes
-    private static final Class<?> SC; // android.view.SurfaceControl
-    private static final Class<?> TransactionClass; // android.view.SurfaceControl$Transaction
+    private static final String TAG = "VDD";
 
-    // Display creation/destroy
-    private static Method createDisplay;
-    private static Method destroyDisplay;
+    private static Class<?> SC;
+    private static Class<?> TransactionClass;
 
-    // Static transaction methods (preferred, like scrcpy)
-    private static Method openTransaction;
-    private static Method closeTransaction;
-    private static Method setDisplaySurfaceStatic;     // SurfaceControl.setDisplaySurface(IBinder, Surface)
-    private static Method setDisplayProjectionStatic;  // SurfaceControl.setDisplayProjection(IBinder, int, Rect, Rect)
-    private static Method setDisplayLayerStackStatic;  // SurfaceControl.setDisplayLayerStack(IBinder, int)
+    // Core display/control methods
+    private static Method createDisplayMethod;
+    private static Method destroyDisplayMethod;
 
-    // Instance Transaction methods (fallback)
-    private static Method setDisplaySurfaceTxn;        // Transaction.setDisplaySurface(IBinder, Surface)
-    private static Method setDisplayProjectionTxn;     // Transaction.setDisplayProjection(IBinder, int, Rect, Rect)
+    // Getting the main display token: multiple fallbacks
+    private static Method getBuiltInDisplayMethod;       // getBuiltInDisplay(int)           [older]
+    private static Method getInternalDisplayTokenMethod; // getInternalDisplayToken()        [newer]
+    private static Method getPhysicalDisplayTokenMethod; // getPhysicalDisplayToken(int)     [alt]
 
-    // Built-in/internal/physical display token discovery (multiple fallbacks)
-    private static Method getBuiltInDisplay;           // SurfaceControl.getBuiltInDisplay(int)
-    private static Method getInternalDisplayToken;     // SurfaceControl.getInternalDisplayToken()
-    private static Method getPhysicalDisplayIds;       // SurfaceControl.getPhysicalDisplayIds()
-    private static Method getPhysicalDisplayToken;     // SurfaceControl.getPhysicalDisplayToken(long)
+    // Transactions
+    private static Method openTransactionMethod;
+    private static Method closeTransactionMethod;
 
-    // Display info via DisplayManagerGlobal (preferred)
-    private static Class<?> DisplayManagerGlobalClass;
-    private static Method getInstanceDMG;
-    private static Method getDisplayInfoDMG;
-    private static Class<?> DisplayInfoClass;
-    private static Constructor<?> DisplayInfoCtor;
-    private static Field appWidthField;
-    private static Field appHeightField;
-    private static Field rotationField;
-    private static Field layerStackField; // may not exist on newer builds
+    // Static path (no Transaction)
+    private static Method setDisplaySurfaceMethod;
+    private static Method setDisplayProjectionMethod;
+    private static Method setDisplayLayerStackMethod;
 
-    // Optional SurfaceControl.getDisplayInfo(binder, DisplayInfo)
-    private static Method getDisplayInfoSC;
+    // Transaction variants
+    private static Method setDisplaySurfaceTMethod;
+    private static Method setDisplayProjectionTMethod;
+    private static Method setDisplayLayerStackTMethod;
+    private static Method transactionApplyMethod;
+
+    // Power control (optional, OEM/version-dependent)
+    private static Method setDisplayPowerModeMethod;     // setDisplayPowerMode(IBinder,int)
+    private static Method setDisplayEnabledMethod;       // setDisplayEnabled(IBinder,boolean)
 
     static {
         try {
@@ -54,263 +47,235 @@ public final class SurfaceControlWrapper {
             TransactionClass = Class.forName("android.view.SurfaceControl$Transaction");
 
             // Display create/destroy
-            createDisplay = find(SC, "createDisplay", String.class, boolean.class);
-            destroyDisplay = find(SC, "destroyDisplay", IBinder.class);
-
-            // Static transaction path (scrcpy-preferred)
-            openTransaction = find(SC, "openTransaction");
-            closeTransaction = find(SC, "closeTransaction");
-            setDisplaySurfaceStatic = find(SC, "setDisplaySurface", IBinder.class, Surface.class);
-            setDisplayProjectionStatic = find(SC, "setDisplayProjection", IBinder.class, int.class, Rect.class, Rect.class);
-            setDisplayLayerStackStatic = find(SC, "setDisplayLayerStack", IBinder.class, int.class);
-
-            // Transaction instance methods (fallback)
-            setDisplaySurfaceTxn = find(TransactionClass, "setDisplaySurface", IBinder.class, Surface.class);
-            setDisplayProjectionTxn = find(TransactionClass, "setDisplayProjection", IBinder.class, int.class, Rect.class, Rect.class);
-
-            // Built-in display token methods (varies by API/OEM)
-            getBuiltInDisplay = find(SC, "getBuiltInDisplay", int.class);
-            getInternalDisplayToken = find(SC, "getInternalDisplayToken");
-            getPhysicalDisplayIds = find(SC, "getPhysicalDisplayIds");
-            getPhysicalDisplayToken = find(SC, "getPhysicalDisplayToken", long.class);
-
-            // Display info classes/methods
             try {
-                DisplayInfoClass = Class.forName("android.view.DisplayInfo");
-                getDisplayInfoSC = find(SC, "getDisplayInfo", IBinder.class, DisplayInfoClass);
-            } catch (Throwable ignored) {
-                DisplayInfoClass = null;
-                getDisplayInfoSC = null;
-            }
-
-            // DisplayManagerGlobal path
+                createDisplayMethod = SC.getDeclaredMethod("createDisplay", String.class, boolean.class);
+            } catch (NoSuchMethodException ignored) {}
             try {
-                DisplayManagerGlobalClass = Class.forName("android.view.DisplayManagerGlobal");
-                getInstanceDMG = find(DisplayManagerGlobalClass, "getInstance");
-                getDisplayInfoDMG = find(DisplayManagerGlobalClass, "getDisplayInfo", int.class);
+                destroyDisplayMethod = SC.getDeclaredMethod("destroyDisplay", IBinder.class);
+            } catch (NoSuchMethodException ignored) {}
 
-                if (DisplayInfoClass == null) {
-                    DisplayInfoClass = Class.forName("android.view.DisplayInfo");
-                }
-                DisplayInfoCtor = DisplayInfoClass.getDeclaredConstructor();
-                DisplayInfoCtor.setAccessible(true);
+            // Main display token fallbacks
+            try {
+                getBuiltInDisplayMethod = SC.getDeclaredMethod("getBuiltInDisplay", int.class);
+            } catch (NoSuchMethodException ignored) {}
+            try {
+                getInternalDisplayTokenMethod = SC.getDeclaredMethod("getInternalDisplayToken");
+            } catch (NoSuchMethodException ignored) {}
+            try {
+                getPhysicalDisplayTokenMethod = SC.getDeclaredMethod("getPhysicalDisplayToken", int.class);
+            } catch (NoSuchMethodException ignored) {}
 
-                appWidthField = findField(DisplayInfoClass, "appWidth");
-                appHeightField = findField(DisplayInfoClass, "appHeight");
-                rotationField = findFieldAny(DisplayInfoClass, "rotation", "logicalRotation");
-                layerStackField = findField(DisplayInfoClass, "layerStack");
-            } catch (Throwable ignored) {
-            }
-        } catch (Exception e) {
-            throw new RuntimeException("SurfaceControlWrapper init failed", e);
+            // Transaction management
+            try {
+                openTransactionMethod = SC.getDeclaredMethod("openTransaction");
+            } catch (NoSuchMethodException ignored) {}
+            try {
+                closeTransactionMethod = SC.getDeclaredMethod("closeTransaction");
+            } catch (NoSuchMethodException ignored) {}
+
+            // Static setters
+            try {
+                setDisplaySurfaceMethod = SC.getDeclaredMethod("setDisplaySurface", IBinder.class, Surface.class);
+            } catch (NoSuchMethodException ignored) {}
+            try {
+                setDisplayProjectionMethod = SC.getDeclaredMethod("setDisplayProjection",
+                        IBinder.class, int.class, Rect.class, Rect.class);
+            } catch (NoSuchMethodException ignored) {}
+            try {
+                setDisplayLayerStackMethod = SC.getDeclaredMethod("setDisplayLayerStack", IBinder.class, int.class);
+            } catch (NoSuchMethodException ignored) {}
+
+            // Transaction setters
+            try {
+                setDisplaySurfaceTMethod = SC.getDeclaredMethod("setDisplaySurface",
+                        TransactionClass, IBinder.class, Surface.class);
+            } catch (NoSuchMethodException ignored) {}
+            try {
+                setDisplayProjectionTMethod = SC.getDeclaredMethod("setDisplayProjection",
+                        TransactionClass, IBinder.class, int.class, Rect.class, Rect.class);
+            } catch (NoSuchMethodException ignored) {}
+            // Note: some builds don’t expose a Transaction variant for layer stack; use static method if needed
+            try {
+                setDisplayLayerStackTMethod = SC.getDeclaredMethod("setDisplayLayerStack",
+                        IBinder.class, int.class);
+            } catch (NoSuchMethodException ignored) {}
+
+            try {
+                transactionApplyMethod = TransactionClass.getDeclaredMethod("apply");
+            } catch (NoSuchMethodException ignored) {}
+
+            // Power control (these are optional and may not exist)
+            try {
+                setDisplayPowerModeMethod = SC.getDeclaredMethod("setDisplayPowerMode", IBinder.class, int.class);
+            } catch (NoSuchMethodException ignored) {}
+            try {
+                setDisplayEnabledMethod = SC.getDeclaredMethod("setDisplayEnabled", IBinder.class, boolean.class);
+            } catch (NoSuchMethodException ignored) {}
+
+        } catch (Throwable t) {
+            Log.e(TAG, "Reflection init failed", t);
         }
     }
 
-    private SurfaceControlWrapper() {}
-
-    // ------- helpers -------
-
-    private static Method find(Class<?> cls, String name, Class<?>... params) {
-        try {
-            Method m = cls.getDeclaredMethod(name, params);
-            m.setAccessible(true);
-            return m;
-        } catch (Throwable e) {
-            return null;
-        }
-    }
-
-    private static Field findField(Class<?> cls, String name) {
-        try {
-            Field f = cls.getDeclaredField(name);
-            f.setAccessible(true);
-            return f;
-        } catch (Throwable e) {
-            return null;
-        }
-    }
-
-    private static Field findFieldAny(Class<?> cls, String... names) {
-        for (String n : names) {
-            Field f = findField(cls, n);
-            if (f != null) return f;
-        }
-        return null;
-    }
-
-    // ------- display create/destroy -------
+    // --- Display management ---
 
     public static IBinder createDisplay(String name, boolean secure) {
-        if (createDisplay == null) throw new RuntimeException("createDisplay hidden method unavailable");
+        if (createDisplayMethod == null) throw new UnsupportedOperationException("createDisplay not available");
         try {
-            return (IBinder) createDisplay.invoke(null, name, secure);
+            return (IBinder) createDisplayMethod.invoke(null, name, secure);
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
     }
 
-    public static void destroyDisplay(IBinder display) {
-        if (destroyDisplay == null) return;
+    public static void destroyDisplay(IBinder displayToken) {
+        if (destroyDisplayMethod == null) return;
         try {
-            destroyDisplay.invoke(null, display);
-        } catch (Exception ignored) {
+            destroyDisplayMethod.invoke(null, displayToken);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
         }
     }
 
-    // ------- built-in/internal display token -------
-
+    /**
+     * Obtain the main/internal display token, trying several hidden APIs.
+     * Order: getInternalDisplayToken() -> getBuiltInDisplay(0) -> getPhysicalDisplayToken(0)
+     */
     public static IBinder getBuiltInOrInternalDisplay() {
-        // 1) built-in(0)
-        if (getBuiltInDisplay != null) {
-            try {
-                return (IBinder) getBuiltInDisplay.invoke(null, 0);
-            } catch (Exception ignored) {}
+        try {
+            if (getInternalDisplayTokenMethod != null) {
+                IBinder tok = (IBinder) getInternalDisplayTokenMethod.invoke(null);
+                if (tok != null) return tok;
+            }
+            if (getBuiltInDisplayMethod != null) {
+                IBinder tok = (IBinder) getBuiltInDisplayMethod.invoke(null, 0 /* BUILT_IN_DISPLAY_ID_MAIN */);
+                if (tok != null) return tok;
+            }
+            if (getPhysicalDisplayTokenMethod != null) {
+                IBinder tok = (IBinder) getPhysicalDisplayTokenMethod.invoke(null, 0 /* main physical id */);
+                if (tok != null) return tok;
+            }
+        } catch (Exception e) {
+            throw new RuntimeException(e);
         }
-        // 2) internal token
-        if (getInternalDisplayToken != null) {
-            try {
-                return (IBinder) getInternalDisplayToken.invoke(null);
-            } catch (Exception ignored) {}
-        }
-        // 3) physical displays
-        if (getPhysicalDisplayIds != null && getPhysicalDisplayToken != null) {
-            try {
-                long[] ids = (long[]) getPhysicalDisplayIds.invoke(null);
-                if (ids != null && ids.length > 0) {
-                    return (IBinder) getPhysicalDisplayToken.invoke(null, ids[0]);
-                }
-            } catch (Exception ignored) {}
-        }
-        throw new RuntimeException("Unable to resolve internal display token");
+        throw new UnsupportedOperationException("No method to obtain main display token is available on this build");
     }
 
-    // ------- static transaction path (preferred) -------
+    // --- Transactions ---
 
     public static void openTransaction() {
-        if (openTransaction == null) return;
+        if (openTransactionMethod == null) throw new UnsupportedOperationException("openTransaction not available");
         try {
-            openTransaction.invoke(null);
-        } catch (Exception ignored) {
+            openTransactionMethod.invoke(null);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
         }
     }
 
     public static void closeTransaction() {
-        if (closeTransaction == null) return;
+        if (closeTransactionMethod == null) throw new UnsupportedOperationException("closeTransaction not available");
         try {
-            closeTransaction.invoke(null);
-        } catch (Exception ignored) {
-        }
-    }
-
-    public static void setDisplaySurface(IBinder display, Surface surface) {
-        if (setDisplaySurfaceStatic == null) throw new RuntimeException("setDisplaySurface(hidden) unavailable");
-        try {
-            setDisplaySurfaceStatic.invoke(null, display, surface);
+            closeTransactionMethod.invoke(null);
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
     }
 
-    public static void setDisplayProjection(IBinder display, int rotation, Rect crop, Rect viewport) {
-        if (setDisplayProjectionStatic == null) throw new RuntimeException("setDisplayProjection(hidden) unavailable");
+    // --- Projection / Surface binding (static path) ---
+
+    public static void setDisplaySurface(IBinder displayToken, Surface surface) {
+        if (setDisplaySurfaceMethod == null) throw new UnsupportedOperationException("setDisplaySurface not available");
         try {
-            setDisplayProjectionStatic.invoke(null, display, rotation, crop, viewport);
+            setDisplaySurfaceMethod.invoke(null, displayToken, surface);
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
     }
 
-    public static void setDisplayLayerStack(IBinder display, int layerStack) {
-        if (setDisplayLayerStackStatic == null) return;
+    public static void setDisplayProjection(IBinder displayToken, int rotation, Rect layerStackRect, Rect displayRect) {
+        if (setDisplayProjectionMethod == null) throw new UnsupportedOperationException("setDisplayProjection not available");
         try {
-            setDisplayLayerStackStatic.invoke(null, display, layerStack);
-        } catch (Exception ignored) {
-        }
-    }
-
-    // ------- Transaction instance fallback -------
-
-    public static void setDisplaySurface(Object txn, IBinder display, Surface surface) {
-        if (setDisplaySurfaceTxn == null) throw new RuntimeException("Transaction.setDisplaySurface(hidden) unavailable");
-        try {
-            setDisplaySurfaceTxn.invoke(txn, display, surface);
+            setDisplayProjectionMethod.invoke(null, displayToken, rotation, layerStackRect, displayRect);
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
     }
 
-    public static void setDisplayProjection(Object txn, IBinder display, int rotation, Rect crop, Rect viewport) {
-        if (setDisplayProjectionTxn == null) throw new RuntimeException("Transaction.setDisplayProjection(hidden) unavailable");
+    public static void setDisplayLayerStack(IBinder displayToken, int layerStack) {
+        if (setDisplayLayerStackMethod == null) throw new UnsupportedOperationException("setDisplayLayerStack not available");
         try {
-            setDisplayProjectionTxn.invoke(txn, display, rotation, crop, viewport);
+            setDisplayLayerStackMethod.invoke(null, displayToken, layerStack);
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
     }
 
-    // ------- display info -------
+    // --- Projection / Surface binding (Transaction path) ---
 
-    public static class DisplayInfoData {
-        public final int width;
-        public final int height;
-        public final int rotation;
-        public final Integer layerStack;
-
-        public DisplayInfoData(int width, int height, int rotation, Integer layerStack) {
-            this.width = width;
-            this.height = height;
-            this.rotation = rotation;
-            this.layerStack = layerStack;
+    public static void setDisplaySurface(android.view.SurfaceControl.Transaction t, IBinder displayToken, Surface surface) {
+        if (setDisplaySurfaceTMethod == null) throw new UnsupportedOperationException("Transaction setDisplaySurface not available");
+        try {
+            setDisplaySurfaceTMethod.invoke(null, t, displayToken, surface);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
         }
     }
 
-    public static DisplayInfoData queryBuiltInDisplayInfo() {
-        // DMG path
+    public static void setDisplayProjection(android.view.SurfaceControl.Transaction t, IBinder displayToken, int rotation, Rect layerStackRect, Rect displayRect) {
+        if (setDisplayProjectionTMethod == null) throw new UnsupportedOperationException("Transaction setDisplayProjection not available");
         try {
-            if (getInstanceDMG != null && getDisplayInfoDMG != null && DisplayInfoCtor != null) {
-                Object dmg = getInstanceDMG.invoke(null);
-                Object di = getDisplayInfoDMG.invoke(dmg, 0);
-                if (di != null) {
-                    int w = getInt(di, appWidthField, 1080);
-                    int h = getInt(di, appHeightField, 1920);
-                    int rot = getInt(di, rotationField, 0);
-                    Integer ls = getInteger(di, layerStackField);
-                    return new DisplayInfoData(w, h, rot, ls);
-                }
+            setDisplayProjectionTMethod.invoke(null, t, displayToken, rotation, layerStackRect, displayRect);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    /**
+     * Some builds do not provide a Transaction variant for layer stack.
+     * In such cases, call the static method before/after applying the transaction.
+     */
+    public static void setDisplayLayerStack(android.view.SurfaceControl.Transaction t, IBinder displayToken, int layerStack) {
+        if (setDisplayLayerStackTMethod != null) {
+            try {
+                // Note: On many builds, setDisplayLayerStack only exists as a static method.
+                setDisplayLayerStackTMethod.invoke(null, displayToken, layerStack);
+                return;
+            } catch (Exception e) {
+                throw new RuntimeException(e);
             }
-        } catch (Throwable ignored) {}
+        }
+        // Fallback to static if Transaction variant not available
+        setDisplayLayerStack(displayToken, layerStack);
+    }
 
-        // SC.getDisplayInfo fallback (if present)
+    public static void applyTransaction(android.view.SurfaceControl.Transaction t) {
+        if (transactionApplyMethod == null) throw new UnsupportedOperationException("Transaction.apply not available");
         try {
-            if (getDisplayInfoSC != null && DisplayInfoCtor != null) {
-                IBinder builtIn = getBuiltInOrInternalDisplay();
-                Object di = DisplayInfoCtor.newInstance();
-                Object ok = getDisplayInfoSC.invoke(null, builtIn, di);
-                if (ok != null) {
-                    int w = getInt(di, appWidthField, 1080);
-                    int h = getInt(di, appHeightField, 1920);
-                    int rot = getInt(di, rotationField, 0);
-                    Integer ls = getInteger(di, layerStackField);
-                    return new DisplayInfoData(w, h, rot, ls);
-                }
+            transactionApplyMethod.invoke(t);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    // --- Power mode (optional) ---
+
+    /**
+     * Attempts to turn the display on/off. Tries setDisplayPowerMode first, then setDisplayEnabled.
+     */
+    public static void setDisplayPowerMode(IBinder displayToken, int mode) {
+        try {
+            if (setDisplayPowerModeMethod != null) {
+                setDisplayPowerModeMethod.invoke(null, displayToken, mode);
+                return;
             }
-        } catch (Throwable ignored) {}
-
-        // Default fallback
-        return new DisplayInfoData(1080, 1920, 0, null);
-    }
-
-    private static int getInt(Object obj, Field field, int def) {
-        try {
-            if (field != null) return (int) field.get(obj);
-        } catch (Throwable ignored) {}
-        return def;
-    }
-
-    private static Integer getInteger(Object obj, Field field) {
-        try {
-            if (field != null) return (Integer) field.get(obj);
-        } catch (Throwable ignored) {}
-        return null;
+            if (setDisplayEnabledMethod != null) {
+                boolean enabled = (mode != 0); // treat 0 as OFF, others as ON
+                setDisplayEnabledMethod.invoke(null, displayToken, enabled);
+                return;
+            }
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        throw new UnsupportedOperationException("No power mode API available on this build");
     }
 }
