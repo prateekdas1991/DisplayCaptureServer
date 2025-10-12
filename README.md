@@ -1,75 +1,91 @@
-# DisplayCaptureServer
-
-A lightweight Android display capture server that uses hidden `SurfaceControl.Transaction` APIs to create a virtual display, crop a region, and encode it to H.264 using `MediaCodec`.  
-The encoded stream is dumped as raw NAL units (`dump.raw`) to `/sdcard/`.
-
-⚠️ **Note:** This tool relies on hidden Android APIs (`SurfaceControl`) and is intended for system‑level testing/KPI measurement. It may not work on all Android versions without adapting the reflection layer (`HiddenTxn`).
-
----
+📖 VirtualDisplayDumpServer – Usage Guide
 
 ## Features
 - Crops a fixed output size (**248×144**) from a configurable start `(x,y)` coordinate.
 - Encodes to H.264 (`video/avc`) at **1 Mbps**, **30 fps**, with **1s keyframe interval**.
 - Duration is configurable, with a **default of 1 minute** and a **hard cap of 3 minutes**.
-- Dumps raw H.264 stream to `/sdcard/dump.raw`.
 
----
+🔧 Push the JAR to device
 
-## Build
-
-Compile into a dex‑jar (e.g. with Maven + Android SDK):
-
-```bash
-mvn package -Pandroid-dex
 ```
----
+adb push VirtualDisplayDumpServer.jar /data/local/tmp/
 
-Push to device:
-```
-adb push target/server-dex.jar /data/local/tmp/server.jar
 ```
 
 
-Run
-Launch via app_process:
-```
-adb shell CLASSPATH=/data/local/tmp/server.jar app_process / com.dcp.DisplayCaptureServer [durationMs] [startX] [startY]
-```
----
-Parameters
-- durationMs (optional): capture duration in milliseconds.
-- Default: 60000 (1 min)
-- Max: 180000 (3 min cap)
-- startX (optional): crop start X coordinate. Default: 390
-- startY (optional): crop start Y coordinate. Default: 450
+▶️ Run with defaults
+Runs for 60 s, full screen, rotation = 0.
 
-Examples
-- Default (1 min, crop at 390,450):
 ```
-adb shell CLASSPATH=/data/local/tmp/server.jar app_process / com.dcp.DisplayCaptureServer
-```
----
-
-- Custom duration (90 sec):
-```
-adb shell CLASSPATH=/data/local/tmp/server.jar app_process / com.dcp.DisplayCaptureServer 90000
+adb shell CLASSPATH=/data/local/tmp/VirtualDisplayDumpServer.jar \
+    app_process / com.dcp.VirtualDisplayDumpServer
 ```
 
 
-- Custom duration + crop start (x=100, y=200):
+⏱️ Custom duration
+Example: run for 90 s.
 
 ```
-adb shell CLASSPATH=/data/local/tmp/server.jar app_process / com.dcp.DisplayCaptureServer 120000 100 200
+adb shell CLASSPATH=/data/local/tmp/VirtualDisplayDumpServer.jar \
+    app_process / com.dcp.VirtualDisplayDumpServer --time 90000
 ```
 
 
----
-- Oversized request (10 min) → capped at 3 min:
+✂️ Crop region
+Syntax: --crop X:Y:W:H
+Example: capture a 248×144 patch at (390,450) for 60 s.
 
 ```
-adb shell CLASSPATH=/data/local/tmp/server.jar app_process / com.dcp.DisplayCaptureServer 600000
+adb shell CLASSPATH=/data/local/tmp/VirtualDisplayDumpServer.jar \
+    app_process / com.dcp.VirtualDisplayDumpServer --time 60000 --crop 390:450:248:144
 ```
 
 ---
-Output
-- File: /sdcard/dump.raw
+
+🔄 Rotation
+Values:
+- 0 = 0° (portrait)
+- 1 = 90° (landscape)
+- 2 = 180°
+- 3 = 270°
+Example: landscape capture.
+
+```
+adb shell CLASSPATH=/data/local/tmp/VirtualDisplayDumpServer.jar \
+    app_process / com.dcp.VirtualDisplayDumpServer --time 60000 --crop 390:450:248:144 --rotation 1
+```
+
+---
+
+🌙 Screen‑off mode
+Turn off the physical screen during capture (like scrcpy -S).
+
+```
+adb shell CLASSPATH=/data/local/tmp/VirtualDisplayDumpServer.jar \
+    app_process / com.dcp.VirtualDisplayDumpServer --time 60000 --crop 390:450:248:144 --screen-off
+```
+
+---
+
+📂 Output
+- Raw H.264 stream is written to:
+/sdcard/kpi_dump.h264
+- Pull it back:
+
+```
+adb pull /sdcard/kpi_dump.h264 .
+```
+
+- Optional: remux to MP4 for playback:
+
+```
+ffmpeg -r 30 -i kpi_dump.h264 -c copy out.mp4
+```
+
+
+✅ Summary
+- --crop X:Y:W:H is required.
+- --time, --rotation, and --screen-off are optional.
+- Output is always /sdcard/kpi_dump.h264.
+
+
