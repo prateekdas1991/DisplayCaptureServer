@@ -159,7 +159,7 @@ public class VirtualDisplayDumpServer {
                             bos.write(nal);
 
                             // Optional: log frame timing
-                            Log.d(TAG, "Frame " + frameCount + " pts=" + info.presentationTimeUs);
+                            //Log.d(TAG, "Frame " + frameCount + " pts=" + info.presentationTimeUs);
                             frameCount++;
                         }
                         codec.releaseOutputBuffer(idx, false);
