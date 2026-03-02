@@ -1,0 +1,108 @@
+// Inside your Angular Chart Component (e.g., library-chart.component.ts)
+
+import { Component, Input, OnInit, ChangeDetectionStrategy, NgZone } from '@angular/core';
+import { EChartsOption } from 'echarts';
+
+@Component({
+  selector: 'app-library-chart',
+  template: `
+    <div class="chart-container">
+      <h3>{{ libraryName }}</h3>
+      <div echarts [options]="chartOption" (chartInit)="onChartInit($event)" class="hw-chart"></div>
+    </div>
+  `,
+  styles: [`
+    .chart-container { width: 100%; height: 350px; border-bottom: 1px solid #ccc; margin-bottom: 20px; }
+    .hw-chart { width: 100%; height: 300px; }
+  `],
+  // 1. PERFORMANCE: Optimize Angular Change Detection
+  changeDetection: ChangeDetectionStrategy.OnPush 
+})
+export class LibraryChartComponent implements OnInit {
+  @Input() libraryName: string = 'libcamx_ipe.so';
+  @Input() chartData: any; // Data aggregated by your Spring Boot 40-core backend
+
+  chartOption: EChartsOption;
+  echartsInstance: any;
+
+  constructor(private ngZone: NgZone) {}
+
+  ngOnInit(): void {
+    // 3. PERFORMANCE: Force the Canvas Renderer for GPU Acceleration
+    this.chartOption = this.getUnifiedChartConfig(this.chartData);
+  }
+
+  onChartInit(ec) {
+    this.echartsInstance = ec;
+  }
+
+  // --- The "Google L7 Unified" Config ---
+  private getUnifiedChartConfig(data): EChartsOption {
+    return {
+      renderer: 'canvas', // <--- Crucial GPU Acceleration
+      tooltip: {
+        trigger: 'axis',
+        axisPointer: { type: 'cross' },
+        formatter: (params) => {
+          // Custom tooltip to show the composition
+          let res = `${params[0].name}<br/>`;
+          params.forEach(p => { res += `${p.marker} ${p.seriesName}: ${p.value.toLocaleString()} KB<br/>`; });
+          return res;
+        }
+      },
+      legend: {
+        data: ['r-xp (Code)', 'r--p (Data)', 'rw-p (Heap/Dirty)', 'Total Private Dirty', 'RSS (Resident Size)']
+      },
+      xAxis: {
+        type: 'category',
+        boundaryGap: false,
+        data: data.timestamps // Array of strings (e.g., T-10s, T-9s...)
+      },
+      yAxis: {
+        type: 'value',
+        axisLabel: { formatter: '{value} KB' }
+      },
+      series: [
+        // --- 4. Stacked Area PSS Permissions (Horizontal Addition) ---
+        {
+          name: 'r-xp (Code)',
+          type: 'line',
+          stack: 'total_pss', // Stack group
+          areaStyle: { opacity: 0.5 }, // Define as Area
+          color: '#3398DB', // Blue
+          data: data.rxp_pss
+        },
+        {
+          name: 'r--p (Data)',
+          type: 'line',
+          stack: 'total_pss',
+          areaStyle: { opacity: 0.5 },
+          color: '#2ECC71', // Green
+          data: data.rp_pss
+        },
+        {
+          name: 'rw-p (Heap/Dirty)',
+          type: 'line',
+          stack: 'total_pss',
+          areaStyle: { opacity: 0.5 },
+          color: '#E74C3C', // Red
+          data: data.rwp_pss
+        },
+
+        // --- 5. Critical Metrics Overlays (Non-Stacked) ---
+        {
+          name: 'Total Private Dirty',
+          type: 'line',
+          lineStyle: { width: 3, color: '#000000' }, // Bold black line
+          data: data.private_dirty
+        },
+        {
+          name: 'RSS (Resident Size)',
+          type: 'line',
+          lineStyle: { type: 'dotted', color: '#7F8C8D' }, // Gray dotted line
+          data: data.rss
+        }
+      ]
+    };
+  }
+}
